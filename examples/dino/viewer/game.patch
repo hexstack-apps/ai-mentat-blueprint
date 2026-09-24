@@ -1,0 +1,113 @@
+--- game.orig.js
++++ game.js
+@@ -274,9 +274,16 @@
+             this.init()
+         },
+         loadSounds: function() {
++            // HARNESS PATCH: the original page ships a <template> of base64
++            // audio. Sound is irrelevant to policy evaluation, and a missing
++            // template threw "Cannot read properties of null (reading
++            // 'content')" from inside onKeyDown - i.e. the game could not be
++            // STARTED at all. Degrade silently instead of failing the run.
++            var __tpl = document.getElementById(this.config.RESOURCE_TEMPLATE_ID);
++            if (!__tpl || !__tpl.content) return;
+             if (!IS_IOS && AudioContext) { // Fix 12.06.17
+                 this.audioContext = new AudioContext();
+-                var resourceTemplate = document.getElementById(this.config.RESOURCE_TEMPLATE_ID).content;
++                var resourceTemplate = __tpl.content;
+                 for (var sound in Runner.sounds) {
+                     var soundSrc = resourceTemplate.getElementById(Runner.sounds[sound]).src;
+                     soundSrc = soundSrc.substr(soundSrc.indexOf(',') + 1);
+@@ -653,7 +660,9 @@
+         raq: function() {
+             if (!this.drawPending) {
+                 this.drawPending = true;
+-                this.raqId = requestAnimationFrame(this.update.bind(this))
++                this.raqId = (window.__CLOCK && window.__CLOCK.manual)
++                    ? window.__CLOCK.queue(this.update.bind(this))
++                    : requestAnimationFrame(this.update.bind(this))
+             }
+         },
+         isRunning: function() {
+@@ -907,8 +916,15 @@
+     }
+ 
+     function getTimeStamp() {
+-        //return IS_IOS ? new Date().getTime() : performance.now()
+-        return new Date().getTime(); // Safari 5.17 Fix 12.06.17
++        // HARNESS PATCH: a controllable clock.
++        // Everything in this game derives from getTimeStamp() - deltaTime,
++        // distanceRan, obstacle movement, the jump arc. Overriding it is the
++        // ONE place that makes the simulation steppable without corrupting
++        // it. Contrast with the earlier failed attempt of overwriting
++        // Runner.time from outside, which produced obstacles drifting AWAY
++        // from the player and distanceRan reading 650845248688.
++        if (window.__CLOCK && window.__CLOCK.manual) return window.__CLOCK.t;
++        return new Date().getTime();
+     }
+ 
+     function GameOverPanel(canvas, textImgPos, restartImgPos, dimensions) {
+@@ -1442,6 +1458,9 @@
+         update: function(deltaTime, distance) {
+             var paint = true;
+             var playSound = false;
++            // keep the unconverted argument: the conversion below is
++            // conditional, and the live-record patch needs points every frame
++            var rawDistance = distance;
+             if (!this.acheivement) {
+                 distance = this.getActualDistance(distance);
+                 if (distance > this.maxScore && this.maxScoreUnits == this.config.MAX_DISTANCE_UNITS) {
+@@ -1481,6 +1500,31 @@
+                     this.draw(i, parseInt(this.digits[i]))
+                 }
+             }
++            // HARNESS PATCH: promote the record as soon as the live score
++            // exceeds it, rather than waiting for gameOver().
++            //
++            // `distance` is derived from distanceRan, which this harness does
++            // NOT reset on restart, so it is CUMULATIVE across episodes.
++            // Comparing it directly promoted the running total: runs of 383,
++            // 1044, 350, 564, 434 points gave X = 21048. Compare the
++            // per-episode DELTA instead, re-baselining whenever the counter
++            // drops (a real restart) or has not been seeded yet.
++            // HARNESS PATCH: promote the record as soon as the live score
++            // exceeds it, instead of waiting for gameOver() - otherwise HI
++            // sits frozen while the live score runs past it all episode.
++            //
++            // `distance` is converted to points ONLY inside the
++            // !acheivement branch above, so during an achievement flash it is
++            // still RAW distanceRan (~40x larger). Promoting that inflated
++            // the record badly: a 200-point run set HI to 7993 and a
++            // 727-point run set it to 29096. Convert explicitly here.
++            var livePts = this.getActualDistance(Math.ceil(rawDistance));
++            if (typeof this.liveHigh !== 'number') this.liveHigh = 0;
++            if (livePts > this.liveHigh) {
++                this.liveHigh = livePts;
++                var liveStr = (this.defaultString + livePts).substr(-this.maxScoreUnits);
++                this.highScore = ['10', '11', ''].concat(liveStr.split(''));
++            }
+             this.drawHighScore();
+             return playSound
+         },
+@@ -1494,8 +1538,20 @@
+         },
+         setHighScore: function(distance) {
+             distance = this.getActualDistance(distance);
++            // HARNESS PATCH: grow the meter to fit instead of truncating.
++            // Evolved policies exceed the 5-digit default, and the original
++            // .substr(-maxScoreUnits) silently rendered the WRONG number
++            // (measured: stored highestScore 59145 displayed as garbage).
++            // defaultString is grown in step so update()'s digit arrays stay
++            // the same length - desyncing them stops the meter repainting.
++            var needed = String(distance).length;
++            while (this.maxScoreUnits < needed) {
++                this.maxScoreUnits++;
++                this.defaultString += '0';
++            }
+             var highScoreStr = (this.defaultString + distance).substr(-this.maxScoreUnits);
+-            this.highScore = ['10', '11', ''].concat(highScoreStr.split(''))
++            this.highScore = ['10', '11', ''].concat(highScoreStr.split(''));
++            this.liveHigh = distance;
+         },
+         reset: function() {
+             this.update(0);
